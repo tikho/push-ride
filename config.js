@@ -1,3 +1,5 @@
+const GAME_TITLE = 'Push Ride';
+
 const CONFIG = {
   jumpPower: 12,
   gravity: 0.6,
