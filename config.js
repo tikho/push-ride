@@ -55,4 +55,8 @@ const CONFIG = {
   muteStorageKey: 'pushRideMuted',
   rumbleGain: 0.03,
   scoresApiUrl: '',
+  cacheVersion: 'm7-v1',
+  attractJumpAhead: 120,
+  attractJumpCooldownMs: 650,
+  attractFlipChance: 0.35,
 };

@@ -3,8 +3,18 @@
   const ctx = canvas.getContext('2d');
   const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
   const safeProbe = document.getElementById('safe-probe');
+  const attractMode =
+    new URLSearchParams(window.location.search).get('attract') === '1';
+  let isOffline = !navigator.onLine;
 
-  if (tg) {
+  window.addEventListener('online', function () {
+    isOffline = false;
+  });
+  window.addEventListener('offline', function () {
+    isOffline = true;
+  });
+
+  if (tg && !attractMode) {
     tg.ready();
     tg.expand();
     if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
@@ -18,6 +28,11 @@
         pauseGame();
       });
     }
+  } else if (tg && attractMode) {
+    tg.ready();
+    tg.expand();
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+    if (tg.BackButton) tg.BackButton.hide();
   }
 
   let cssW = 0;
@@ -376,6 +391,8 @@
   let muteBtn = { x: 0, y: 0, w: 44, h: 44 };
   let leaderboard = { top: [], me: null, loading: false, error: '' };
   let scoreSubmitted = false;
+  let attractJumpCd = 0;
+  let attractFlipArmed = false;
 
   function apiBase() {
     return (CONFIG.scoresApiUrl || '').replace(/\/+$/, '');
@@ -424,6 +441,7 @@
   }
 
   function pauseGame() {
+    if (attractMode) return;
     if (state !== 'play') return;
     state = 'pause';
     pointerHeld = false;
@@ -479,6 +497,8 @@
     camY = player.y - cssH * 0.65;
     state = 'play';
     scoreSubmitted = false;
+    attractJumpCd = 0;
+    attractFlipArmed = false;
     layoutButtons();
   }
 
@@ -553,7 +573,7 @@
     player.flipping = true;
     player.flipAgeMs = 0;
     player.boardSpin = 0;
-    haptic('medium');
+    if (!attractMode) haptic('medium');
     playSound('flip');
   }
 
@@ -579,6 +599,8 @@
       haptic('light');
       return;
     }
+
+    if (attractMode) return;
 
     if (state === 'pause') {
       if (hitRect(continueBtn, p.x, p.y)) resumeGame();
@@ -631,7 +653,7 @@
 
   function spawnAhead() {
     const viewEnd = worldX + cssW + 120;
-    if (!obstaclesArmed && runElapsedMs >= CONFIG.graceSec * 1000) {
+    if (!obstaclesArmed && runElapsedMs >= (attractMode ? 0 : CONFIG.graceSec * 1000)) {
       obstaclesArmed = true;
       nextObstacleX = worldX + player.screenX + CONFIG.obstacleGap;
     }
@@ -721,7 +743,7 @@
       const sy = terrain(s.x) - s.lift;
       if (!circlesHit(px, pcy, s.x, sy)) continue;
       s.taken = true;
-      score += CONFIG.stickerPoints;
+      if (!attractMode) score += CONFIG.stickerPoints;
       burstParticles(s.x, sy, '#ffd24a', 400);
       playSound('sticker');
     }
@@ -751,6 +773,51 @@
     }
   }
 
+  function updateAttract(dt, px) {
+    if (attractJumpCd > 0) attractJumpCd -= dt;
+
+    if (player.inAir) {
+      if (attractFlipArmed && !player.flipping) {
+        startFlip();
+        attractFlipArmed = false;
+      }
+      return;
+    }
+
+    let needJump = false;
+    for (let i = 0; i < obstacles.length; i++) {
+      const o = obstacles[i];
+      if (o.hit) continue;
+      const dx = o.x - px;
+      if (dx > 28 && dx < CONFIG.attractJumpAhead) {
+        needJump = true;
+        if (o.type !== 'crack' && Math.random() < CONFIG.attractFlipChance) {
+          attractFlipArmed = true;
+        }
+        break;
+      }
+    }
+
+    if (!needJump) {
+      for (let i = 0; i < stickers.length; i++) {
+        const s = stickers[i];
+        if (s.taken) continue;
+        const dx = s.x - px;
+        if (dx > 20 && dx < CONFIG.attractJumpAhead * 0.85 && s.lift > 28) {
+          needJump = true;
+          break;
+        }
+      }
+    }
+
+    if (needJump && attractJumpCd <= 0) {
+      if (jump()) {
+        attractJumpCd = CONFIG.attractJumpCooldownMs;
+        playSound('jump');
+      }
+    }
+  }
+
   function update(dt) {
     if (state === 'pause') {
       stopRumble();
@@ -762,16 +829,19 @@
     }
 
     runElapsedMs += dt;
-    timeLeftMs -= dt;
-    if (timeLeftMs <= 0) {
-      timeLeftMs = 0;
-      state = 'result';
-      stopRumble();
-      submitScore();
-      return;
+
+    if (!attractMode) {
+      timeLeftMs -= dt;
+      if (timeLeftMs <= 0) {
+        timeLeftMs = 0;
+        state = 'result';
+        stopRumble();
+        submitScore();
+        return;
+      }
     }
 
-    if (pointerHeld) {
+    if (pointerHeld && !attractMode) {
       holdMs += dt;
       if (holdMs >= CONFIG.flipHoldMs && player.inAir) startFlip();
     }
@@ -785,12 +855,16 @@
     }
     if (shakeLeftMs > 0) shakeLeftMs -= dt;
 
-    const progress = Math.min(1, runElapsedMs / (CONFIG.timerSec * 1000));
+    const progress = attractMode
+      ? Math.min(1, (runElapsedMs % 60000) / 60000)
+      : Math.min(1, runElapsedMs / (CONFIG.timerSec * 1000));
     currentSpeed =
       (CONFIG.speedBase + (CONFIG.speedMax - CONFIG.speedBase) * progress) * speedMul;
     worldX += currentSpeed;
     const px = worldX + player.screenX;
     const groundY = terrain(px);
+
+    if (attractMode) updateAttract(dt, px);
 
     if (player.flipping) {
       player.flipAgeMs += dt;
@@ -812,8 +886,12 @@
         player.flipping = false;
         player.boardSpin = 0;
         spawnLandDust(px, groundY);
-        haptic('medium');
-        playSound('land');
+        if (!attractMode) {
+          haptic('medium');
+          playSound('land');
+        } else {
+          playSound('land');
+        }
       }
     } else {
       player.y = groundY;
@@ -1135,9 +1213,43 @@
     }
   }
 
+  function drawOfflineBadge() {
+    if (!isOffline) return;
+    const x = muteBtn.x - 48;
+    const y = muteBtn.y + 4;
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    roundRect(x, y, 40, 28, 8);
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x + 14, y + 16, 5, Math.PI * 1.1, Math.PI * 1.9);
+    ctx.arc(x + 22, y + 14, 7, Math.PI * 1.15, Math.PI * 0.15, true);
+    ctx.arc(x + 30, y + 16, 5, Math.PI * 1.2, Math.PI * 0.2, true);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x + 8, y + 22);
+    ctx.lineTo(x + 32, y + 6);
+    ctx.stroke();
+  }
+
   function drawHud() {
     const padTop = safeTop + 16;
     const pad = 16;
+
+    if (attractMode) {
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+      ctx.font = '800 28px system-ui, sans-serif';
+      ctx.fillText(GAME_TITLE, cssW / 2, padTop + 28);
+      ctx.font = '600 14px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx.fillText('Режим стенда', cssW / 2, padTop + 52);
+      drawMuteButton();
+      drawOfflineBadge();
+      return;
+    }
+
     ctx.fillStyle = 'rgba(0,0,0,0.35)';
     ctx.fillRect(pad, padTop, 150, 54);
     ctx.fillRect(cssW - pad - 150 - 52, padTop, 150, 54);
@@ -1157,6 +1269,7 @@
     ctx.fillText(String(sec), cssW - pad - 64, padTop + 46);
 
     drawMuteButton();
+    drawOfflineBadge();
 
     if (state === 'play' && runElapsedMs < CONFIG.graceSec * 1000) {
       ctx.textAlign = 'center';
