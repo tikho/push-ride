@@ -54,4 +54,5 @@ const CONFIG = {
   dustCount: 10,
   muteStorageKey: 'pushRideMuted',
   rumbleGain: 0.03,
+  scoresApiUrl: '',
 };

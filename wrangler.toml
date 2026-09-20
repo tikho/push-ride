@@ -1,0 +1,11 @@
+name = "push-ride-scores"
+main = "worker/index.js"
+compatibility_date = "2024-09-23"
+
+[vars]
+# BOT_TOKEN задаётся секретом: wrangler secret put BOT_TOKEN
+
+[[kv_namespaces]]
+binding = "SCORES"
+id = "00000000000000000000000000000000"
+preview_id = "00000000000000000000000000000000"

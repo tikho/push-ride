@@ -11,6 +11,10 @@
     if (tg.BackButton) {
       tg.BackButton.show();
       tg.BackButton.onClick(function () {
+        if (state === 'leaderboard') {
+          state = 'result';
+          return;
+        }
         pauseGame();
       });
     }
@@ -34,19 +38,39 @@
   }
 
   const perm = new Uint8Array(512);
-  (function initPerm() {
+
+  function daySeedString() {
+    const d = new Date();
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(d.getUTCDate()).padStart(2, '0');
+    return y + '-' + m + '-' + day;
+  }
+
+  function hashSeed(str) {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h || 1;
+  }
+
+  function initPerm(seed) {
     const p = new Uint8Array(256);
     for (let i = 0; i < 256; i++) p[i] = i;
-    let seed = 1337;
+    let s = seed >>> 0;
     for (let i = 255; i > 0; i--) {
-      seed = (seed * 16807 + 7) >>> 0;
-      const j = seed % (i + 1);
+      s = (Math.imul(s, 16807) + 7) >>> 0;
+      const j = s % (i + 1);
       const tmp = p[i];
       p[i] = p[j];
       p[j] = tmp;
     }
     for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
-  })();
+  }
+
+  initPerm(hashSeed(daySeedString()));
 
   function fade(t) {
     return t * t * t * (t * (t * 6 - 15) + 10);
@@ -346,8 +370,58 @@
   let currentSpeed = CONFIG.speedBase;
   let replayBtn = { x: 0, y: 0, w: 180, h: 48 };
   let shareBtn = { x: 0, y: 0, w: 180, h: 48 };
+  let recordsBtn = { x: 0, y: 0, w: 180, h: 48 };
   let continueBtn = { x: 0, y: 0, w: 180, h: 48 };
+  let backLbBtn = { x: 0, y: 0, w: 180, h: 48 };
   let muteBtn = { x: 0, y: 0, w: 44, h: 44 };
+  let leaderboard = { top: [], me: null, loading: false, error: '' };
+  let scoreSubmitted = false;
+
+  function apiBase() {
+    return (CONFIG.scoresApiUrl || '').replace(/\/+$/, '');
+  }
+
+  function submitScore() {
+    const base = apiBase();
+    if (!base || scoreSubmitted) return;
+    const initData = tg && tg.initData ? tg.initData : '';
+    if (!initData) return;
+    scoreSubmitted = true;
+    fetch(base + '/score', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ initData: initData, score: score }),
+    }).catch(function () {});
+  }
+
+  function openLeaderboard() {
+    state = 'leaderboard';
+    leaderboard.loading = true;
+    leaderboard.error = '';
+    leaderboard.top = [];
+    leaderboard.me = null;
+    const base = apiBase();
+    if (!base) {
+      leaderboard.loading = false;
+      leaderboard.error = 'API не настроен';
+      return;
+    }
+    const initData = tg && tg.initData ? tg.initData : '';
+    const q = initData ? '?initData=' + encodeURIComponent(initData) : '';
+    fetch(base + '/leaderboard' + q)
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (data) {
+        leaderboard.loading = false;
+        leaderboard.top = (data && data.top) || [];
+        leaderboard.me = (data && data.me) || null;
+      })
+      .catch(function () {
+        leaderboard.loading = false;
+        leaderboard.error = 'Не удалось загрузить';
+      });
+  }
 
   function pauseGame() {
     if (state !== 'play') return;
@@ -404,27 +478,39 @@
     player.y = terrain(worldX + player.screenX);
     camY = player.y - cssH * 0.65;
     state = 'play';
+    scoreSubmitted = false;
     layoutButtons();
   }
 
   function layoutButtons() {
     const btnW = Math.min(220, cssW * 0.6);
     const bottomLimit = cssH - safeBottom - 24;
+    const gap = 12;
 
-    replayBtn.w = btnW;
-    replayBtn.h = 52;
-    replayBtn.x = (cssW - replayBtn.w) / 2;
+    recordsBtn.w = btnW;
+    recordsBtn.h = 48;
+    recordsBtn.x = (cssW - recordsBtn.w) / 2;
+    recordsBtn.y = bottomLimit - recordsBtn.h;
 
     shareBtn.w = btnW;
-    shareBtn.h = 52;
+    shareBtn.h = 48;
     shareBtn.x = (cssW - shareBtn.w) / 2;
-    shareBtn.y = bottomLimit - shareBtn.h;
-    replayBtn.y = shareBtn.y - 14 - replayBtn.h;
+    shareBtn.y = recordsBtn.y - gap - shareBtn.h;
+
+    replayBtn.w = btnW;
+    replayBtn.h = 48;
+    replayBtn.x = (cssW - replayBtn.w) / 2;
+    replayBtn.y = shareBtn.y - gap - replayBtn.h;
 
     continueBtn.w = btnW;
     continueBtn.h = 52;
     continueBtn.x = (cssW - continueBtn.w) / 2;
     continueBtn.y = Math.min(cssH * 0.52, bottomLimit - continueBtn.h);
+
+    backLbBtn.w = btnW;
+    backLbBtn.h = 48;
+    backLbBtn.x = (cssW - backLbBtn.w) / 2;
+    backLbBtn.y = bottomLimit - backLbBtn.h;
 
     muteBtn.w = 44;
     muteBtn.h = 44;
@@ -499,9 +585,15 @@
       return;
     }
 
+    if (state === 'leaderboard') {
+      if (hitRect(backLbBtn, p.x, p.y)) state = 'result';
+      return;
+    }
+
     if (state === 'result') {
       if (hitRect(replayBtn, p.x, p.y)) resetRun();
       else if (hitRect(shareBtn, p.x, p.y)) shareScore();
+      else if (hitRect(recordsBtn, p.x, p.y)) openLeaderboard();
       return;
     }
 
@@ -675,6 +767,7 @@
       timeLeftMs = 0;
       state = 'result';
       stopRumble();
+      submitScore();
       return;
     }
 
@@ -1130,30 +1223,95 @@
     ctx.textAlign = 'center';
     ctx.fillStyle = '#ffffff';
     ctx.font = '800 36px system-ui, sans-serif';
-    ctx.fillText(GAME_TITLE, cssW / 2, cssH * 0.28);
+    ctx.fillText(GAME_TITLE, cssW / 2, cssH * 0.22);
 
     ctx.font = '600 18px system-ui, sans-serif';
     ctx.fillStyle = '#cfd5dd';
-    ctx.fillText('Счёт', cssW / 2, cssH * 0.38);
+    ctx.fillText('Счёт', cssW / 2, cssH * 0.3);
     ctx.font = '800 56px system-ui, sans-serif';
     ctx.fillStyle = '#ffd24a';
-    ctx.fillText(String(score), cssW / 2, cssH * 0.48);
+    ctx.fillText(String(score), cssW / 2, cssH * 0.4);
 
     ctx.fillStyle = '#ff4d6d';
     roundRect(replayBtn.x, replayBtn.y, replayBtn.w, replayBtn.h, 12);
     ctx.fill();
     ctx.fillStyle = '#ffffff';
-    ctx.font = '700 22px system-ui, sans-serif';
-    ctx.fillText('Заново', cssW / 2, replayBtn.y + 34);
+    ctx.font = '700 20px system-ui, sans-serif';
+    ctx.fillText('Заново', cssW / 2, replayBtn.y + 32);
 
     ctx.fillStyle = '#3d7cff';
     roundRect(shareBtn.x, shareBtn.y, shareBtn.w, shareBtn.h, 12);
     ctx.fill();
     ctx.fillStyle = '#ffffff';
-    ctx.font = '700 22px system-ui, sans-serif';
-    ctx.fillText('Поделиться', cssW / 2, shareBtn.y + 34);
+    ctx.fillText('Поделиться', cssW / 2, shareBtn.y + 32);
+
+    ctx.fillStyle = '#2f9e44';
+    roundRect(recordsBtn.x, recordsBtn.y, recordsBtn.w, recordsBtn.h, 12);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('Рекорды', cssW / 2, recordsBtn.y + 32);
 
     drawMuteButton();
+  }
+
+  function drawLeaderboard() {
+    ctx.fillStyle = 'rgba(20, 24, 32, 0.88)';
+    ctx.fillRect(0, 0, cssW, cssH);
+
+    const topY = safeTop + 36;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '800 28px system-ui, sans-serif';
+    ctx.fillText(GAME_TITLE, cssW / 2, topY);
+    ctx.font = '600 16px system-ui, sans-serif';
+    ctx.fillStyle = '#cfd5dd';
+    ctx.fillText('Топ-10 дня', cssW / 2, topY + 28);
+
+    let y = topY + 64;
+    if (leaderboard.loading) {
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '600 18px system-ui, sans-serif';
+      ctx.fillText('Загрузка…', cssW / 2, y + 40);
+    } else if (leaderboard.error) {
+      ctx.fillStyle = '#ff8a8a';
+      ctx.font = '600 16px system-ui, sans-serif';
+      ctx.fillText(leaderboard.error, cssW / 2, y + 40);
+    } else if (!leaderboard.top.length) {
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '600 16px system-ui, sans-serif';
+      ctx.fillText('Пока пусто — будь первым', cssW / 2, y + 40);
+    } else {
+      ctx.textAlign = 'left';
+      ctx.font = '600 16px system-ui, sans-serif';
+      for (let i = 0; i < leaderboard.top.length; i++) {
+        const row = leaderboard.top[i];
+        const rowY = y + i * 28;
+        ctx.fillStyle = i < 3 ? '#ffd24a' : '#ffffff';
+        ctx.fillText(row.place + '. ' + row.name, 28, rowY);
+        ctx.textAlign = 'right';
+        ctx.fillText(String(row.score), cssW - 28, rowY);
+        ctx.textAlign = 'left';
+      }
+    }
+
+    if (leaderboard.me && leaderboard.me.place != null) {
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#9ad0ff';
+      ctx.font = '700 16px system-ui, sans-serif';
+      ctx.fillText(
+        'Ты: #' + leaderboard.me.place + ' · ' + leaderboard.me.score,
+        cssW / 2,
+        backLbBtn.y - 24
+      );
+    }
+
+    ctx.fillStyle = '#ff4d6d';
+    roundRect(backLbBtn.x, backLbBtn.y, backLbBtn.w, backLbBtn.h, 12);
+    ctx.fill();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 20px system-ui, sans-serif';
+    ctx.fillText('Назад', cssW / 2, backLbBtn.y + 32);
   }
 
   function roundRect(x, y, w, h, r) {
@@ -1179,6 +1337,7 @@
     if (state === 'play' || state === 'pause') drawHud();
     if (state === 'pause') drawPause();
     if (state === 'result') drawResult();
+    if (state === 'leaderboard') drawLeaderboard();
   }
 
   function loop(ts) {
