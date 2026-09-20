@@ -52,4 +52,6 @@ const CONFIG = {
   boardH: 18,
   roadWidth: 52,
   dustCount: 10,
+  muteStorageKey: 'pushRideMuted',
+  rumbleGain: 0.03,
 };

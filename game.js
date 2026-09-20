@@ -1,10 +1,37 @@
 (function () {
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
+  const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  const safeProbe = document.getElementById('safe-probe');
+
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+    if (tg.BackButton) {
+      tg.BackButton.show();
+      tg.BackButton.onClick(function () {
+        pauseGame();
+      });
+    }
+  }
 
   let cssW = 0;
   let cssH = 0;
   let dpr = 1;
+  let safeTop = 0;
+  let safeBottom = 0;
+
+  function readSafeInsets() {
+    if (!safeProbe) {
+      safeTop = 0;
+      safeBottom = 0;
+      return;
+    }
+    const style = window.getComputedStyle(safeProbe);
+    safeTop = parseFloat(style.paddingTop) || 0;
+    safeBottom = parseFloat(style.paddingBottom) || 0;
+  }
 
   const perm = new Uint8Array(512);
   (function initPerm() {
@@ -56,7 +83,144 @@
     return Math.atan2(dy, d * 2);
   }
 
-  function playSound(_name) {}
+  let audioCtx = null;
+  let rumbleOsc = null;
+  let rumbleGain = null;
+  let rumbleFilter = null;
+  let muted = false;
+  try {
+    muted = localStorage.getItem(CONFIG.muteStorageKey) === '1';
+  } catch (e) {
+    muted = false;
+  }
+
+  function ensureAudio() {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      audioCtx = new AC();
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  }
+
+  function haptic(style) {
+    try {
+      if (tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred) {
+        tg.HapticFeedback.impactOccurred(style);
+      }
+    } catch (e) {}
+  }
+
+  function playTone(freq, dur, type, vol) {
+    const ctx = ensureAudio();
+    if (!ctx || muted) return;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.value = freq;
+    gain.gain.value = vol || 0.08;
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + dur);
+  }
+
+  function playNoiseBurst(dur, vol) {
+    const ctx = ensureAudio();
+    if (!ctx || muted) return;
+    const len = Math.max(1, (ctx.sampleRate * dur) | 0);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 900;
+    const gain = ctx.createGain();
+    gain.gain.value = vol || 0.1;
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    src.start();
+  }
+
+  function playSound(name) {
+    if (muted) return;
+    if (name === 'sticker') {
+      playTone(880, 0.08, 'triangle', 0.07);
+      playTone(1320, 0.1, 'sine', 0.05);
+    } else if (name === 'land') {
+      playNoiseBurst(0.12, 0.12);
+      playTone(120, 0.1, 'sine', 0.06);
+    } else if (name === 'flip') {
+      playTone(420, 0.15, 'sawtooth', 0.04);
+      playTone(640, 0.18, 'triangle', 0.035);
+    } else if (name === 'jump') {
+      playTone(360, 0.07, 'sine', 0.05);
+    }
+  }
+
+  function startRumble() {
+    if (muted || rumbleOsc) return;
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    rumbleOsc = ctx.createOscillator();
+    rumbleFilter = ctx.createBiquadFilter();
+    rumbleGain = ctx.createGain();
+    rumbleOsc.type = 'sawtooth';
+    rumbleOsc.frequency.value = 55;
+    rumbleFilter.type = 'bandpass';
+    rumbleFilter.frequency.value = 180;
+    rumbleFilter.Q.value = 4;
+    rumbleGain.gain.value = 0;
+    rumbleOsc.connect(rumbleFilter);
+    rumbleFilter.connect(rumbleGain);
+    rumbleGain.connect(ctx.destination);
+    rumbleOsc.start();
+  }
+
+  function updateRumble(onGround, speed) {
+    if (muted) {
+      stopRumble();
+      return;
+    }
+    if (onGround && state === 'play') {
+      startRumble();
+      if (rumbleGain) {
+        const target = Math.min(CONFIG.rumbleGain, 0.01 + speed * 0.004);
+        rumbleGain.gain.value = target;
+      }
+      if (rumbleOsc) rumbleOsc.frequency.value = 45 + speed * 4;
+    } else if (rumbleGain) {
+      rumbleGain.gain.value = 0;
+    }
+  }
+
+  function stopRumble() {
+    if (rumbleOsc) {
+      try {
+        rumbleOsc.stop();
+      } catch (e) {}
+      rumbleOsc.disconnect();
+      if (rumbleFilter) rumbleFilter.disconnect();
+      if (rumbleGain) rumbleGain.disconnect();
+      rumbleOsc = null;
+      rumbleFilter = null;
+      rumbleGain = null;
+    }
+  }
+
+  function setMuted(next) {
+    muted = next;
+    try {
+      localStorage.setItem(CONFIG.muteStorageKey, muted ? '1' : '0');
+    } catch (e) {}
+    if (muted) stopRumble();
+  }
 
   function makePlaceholder(w, h, paint) {
     const c = document.createElement('canvas');
@@ -181,6 +345,36 @@
   let holdMs = 0;
   let currentSpeed = CONFIG.speedBase;
   let replayBtn = { x: 0, y: 0, w: 180, h: 48 };
+  let shareBtn = { x: 0, y: 0, w: 180, h: 48 };
+  let continueBtn = { x: 0, y: 0, w: 180, h: 48 };
+  let muteBtn = { x: 0, y: 0, w: 44, h: 44 };
+
+  function pauseGame() {
+    if (state !== 'play') return;
+    state = 'pause';
+    pointerHeld = false;
+    holdMs = 0;
+    stopRumble();
+  }
+
+  function resumeGame() {
+    if (state !== 'pause') return;
+    state = 'play';
+    lastTs = 0;
+  }
+
+  function shareScore() {
+    const text = GAME_TITLE + ': мой счёт ' + score + '!';
+    if (tg && tg.switchInlineQuery) {
+      try {
+        tg.switchInlineQuery(text);
+        return;
+      } catch (e) {}
+    }
+    if (navigator.share) {
+      navigator.share({ text: text }).catch(function () {});
+    }
+  }
 
   function resetRun() {
     worldX = 0;
@@ -210,6 +404,32 @@
     player.y = terrain(worldX + player.screenX);
     camY = player.y - cssH * 0.65;
     state = 'play';
+    layoutButtons();
+  }
+
+  function layoutButtons() {
+    const btnW = Math.min(220, cssW * 0.6);
+    const bottomLimit = cssH - safeBottom - 24;
+
+    replayBtn.w = btnW;
+    replayBtn.h = 52;
+    replayBtn.x = (cssW - replayBtn.w) / 2;
+
+    shareBtn.w = btnW;
+    shareBtn.h = 52;
+    shareBtn.x = (cssW - shareBtn.w) / 2;
+    shareBtn.y = bottomLimit - shareBtn.h;
+    replayBtn.y = shareBtn.y - 14 - replayBtn.h;
+
+    continueBtn.w = btnW;
+    continueBtn.h = 52;
+    continueBtn.x = (cssW - continueBtn.w) / 2;
+    continueBtn.y = Math.min(cssH * 0.52, bottomLimit - continueBtn.h);
+
+    muteBtn.w = 44;
+    muteBtn.h = 44;
+    muteBtn.x = cssW - 16 - muteBtn.w;
+    muteBtn.y = safeTop + 16;
   }
 
   function resize() {
@@ -221,15 +441,13 @@
     canvas.style.width = cssW + 'px';
     canvas.style.height = cssH + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    readSafeInsets();
     player.screenX = cssW * CONFIG.playerScreenRatio;
     if (player.onGround) {
       player.y = terrain(worldX + player.screenX);
     }
     camY = player.y - cssH * 0.65;
-    replayBtn.w = Math.min(220, cssW * 0.6);
-    replayBtn.h = 52;
-    replayBtn.x = (cssW - replayBtn.w) / 2;
-    replayBtn.y = cssH * 0.58;
+    layoutButtons();
   }
 
   window.addEventListener('resize', resize);
@@ -237,10 +455,11 @@
   resetRun();
 
   function jump() {
-    if (!player.onGround) return;
+    if (!player.onGround) return false;
     player.vy = -CONFIG.jumpPower;
     player.onGround = false;
     player.inAir = true;
+    return true;
   }
 
   function startFlip() {
@@ -248,29 +467,48 @@
     player.flipping = true;
     player.flipAgeMs = 0;
     player.boardSpin = 0;
+    haptic('medium');
+    playSound('flip');
   }
 
-  function hitReplay(clientX, clientY) {
+  function canvasPoint(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
-    const x = ((clientX - rect.left) / rect.width) * cssW;
-    const y = ((clientY - rect.top) / rect.height) * cssH;
-    return (
-      x >= replayBtn.x &&
-      x <= replayBtn.x + replayBtn.w &&
-      y >= replayBtn.y &&
-      y <= replayBtn.y + replayBtn.h
-    );
+    return {
+      x: ((clientX - rect.left) / rect.width) * cssW,
+      y: ((clientY - rect.top) / rect.height) * cssH,
+    };
+  }
+
+  function hitRect(btn, x, y) {
+    return x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h;
   }
 
   canvas.addEventListener('pointerdown', function (e) {
     e.preventDefault();
-    if (state === 'result') {
-      if (hitReplay(e.clientX, e.clientY)) resetRun();
+    ensureAudio();
+    const p = canvasPoint(e.clientX, e.clientY);
+
+    if (hitRect(muteBtn, p.x, p.y)) {
+      setMuted(!muted);
+      haptic('light');
       return;
     }
+
+    if (state === 'pause') {
+      if (hitRect(continueBtn, p.x, p.y)) resumeGame();
+      return;
+    }
+
+    if (state === 'result') {
+      if (hitRect(replayBtn, p.x, p.y)) resetRun();
+      else if (hitRect(shareBtn, p.x, p.y)) shareScore();
+      return;
+    }
+
     pointerHeld = true;
     holdMs = 0;
-    jump();
+    haptic('light');
+    if (jump()) playSound('jump');
   });
 
   canvas.addEventListener('pointerup', function () {
@@ -422,13 +660,21 @@
   }
 
   function update(dt) {
-    if (state !== 'play') return;
+    if (state === 'pause') {
+      stopRumble();
+      return;
+    }
+    if (state !== 'play') {
+      stopRumble();
+      return;
+    }
 
     runElapsedMs += dt;
     timeLeftMs -= dt;
     if (timeLeftMs <= 0) {
       timeLeftMs = 0;
       state = 'result';
+      stopRumble();
       return;
     }
 
@@ -473,6 +719,8 @@
         player.flipping = false;
         player.boardSpin = 0;
         spawnLandDust(px, groundY);
+        haptic('medium');
+        playSound('land');
       }
     } else {
       player.y = groundY;
@@ -491,6 +739,7 @@
     updateCollisions(px);
     pruneEntities(px);
     updateParticles(dt);
+    updateRumble(player.onGround, currentSpeed);
   }
 
   function worldToScreen(x, y, drawCamY) {
@@ -794,33 +1043,84 @@
   }
 
   function drawHud() {
+    const padTop = safeTop + 16;
     const pad = 16;
     ctx.fillStyle = 'rgba(0,0,0,0.35)';
-    ctx.fillRect(pad, pad, 150, 54);
-    ctx.fillRect(cssW - pad - 150, pad, 150, 54);
+    ctx.fillRect(pad, padTop, 150, 54);
+    ctx.fillRect(cssW - pad - 150 - 52, padTop, 150, 54);
 
     ctx.fillStyle = '#ffffff';
     ctx.font = '600 16px system-ui, sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText('Стикеры', pad + 12, pad + 22);
+    ctx.fillText('Стикеры', pad + 12, padTop + 22);
     ctx.font = '700 24px system-ui, sans-serif';
-    ctx.fillText(String(score), pad + 12, pad + 46);
+    ctx.fillText(String(score), pad + 12, padTop + 46);
 
     const sec = Math.ceil(timeLeftMs / 1000);
     ctx.textAlign = 'right';
     ctx.font = '600 16px system-ui, sans-serif';
-    ctx.fillText('Время', cssW - pad - 12, pad + 22);
+    ctx.fillText('Время', cssW - pad - 64, padTop + 22);
     ctx.font = '700 24px system-ui, sans-serif';
-    ctx.fillText(String(sec), cssW - pad - 12, pad + 46);
+    ctx.fillText(String(sec), cssW - pad - 64, padTop + 46);
 
-    if (runElapsedMs < CONFIG.graceSec * 1000) {
+    drawMuteButton();
+
+    if (state === 'play' && runElapsedMs < CONFIG.graceSec * 1000) {
       ctx.textAlign = 'center';
       ctx.fillStyle = 'rgba(255,255,255,0.92)';
       ctx.font = '700 18px system-ui, sans-serif';
-      ctx.fillText('Тап — прыжок · Удерживай — сальто', cssW / 2, cssH * 0.18);
+      ctx.fillText('Тап — прыжок · Удерживай — сальто', cssW / 2, padTop + 78);
       ctx.font = '600 15px system-ui, sans-serif';
-      ctx.fillText('Собирай стикеры · Прыгай через конусы и бордюры', cssW / 2, cssH * 0.18 + 26);
+      ctx.fillText('Собирай стикеры · Прыгай через конусы и бордюры', cssW / 2, padTop + 104);
     }
+  }
+
+  function drawMuteButton() {
+    muteBtn.x = cssW - 16 - muteBtn.w;
+    muteBtn.y = safeTop + 16;
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    roundRect(muteBtn.x, muteBtn.y, muteBtn.w, muteBtn.h, 10);
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    const cx = muteBtn.x + muteBtn.w / 2;
+    const cy = muteBtn.y + muteBtn.h / 2;
+    ctx.beginPath();
+    ctx.moveTo(cx - 8, cy - 5);
+    ctx.lineTo(cx - 2, cy - 5);
+    ctx.lineTo(cx + 5, cy - 10);
+    ctx.lineTo(cx + 5, cy + 10);
+    ctx.lineTo(cx - 2, cy + 5);
+    ctx.lineTo(cx - 8, cy + 5);
+    ctx.closePath();
+    ctx.stroke();
+    if (muted) {
+      ctx.beginPath();
+      ctx.moveTo(cx - 10, cy + 10);
+      ctx.lineTo(cx + 10, cy - 10);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.arc(cx + 6, cy, 6, -0.7, 0.7);
+      ctx.stroke();
+    }
+  }
+
+  function drawPause() {
+    ctx.fillStyle = 'rgba(20, 24, 32, 0.72)';
+    ctx.fillRect(0, 0, cssW, cssH);
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '800 34px system-ui, sans-serif';
+    ctx.fillText('Пауза', cssW / 2, cssH * 0.38);
+
+    ctx.fillStyle = '#ff4d6d';
+    roundRect(continueBtn.x, continueBtn.y, continueBtn.w, continueBtn.h, 12);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 22px system-ui, sans-serif';
+    ctx.fillText('Продолжить', cssW / 2, continueBtn.y + 34);
   }
 
   function drawResult() {
@@ -830,14 +1130,14 @@
     ctx.textAlign = 'center';
     ctx.fillStyle = '#ffffff';
     ctx.font = '800 36px system-ui, sans-serif';
-    ctx.fillText(GAME_TITLE, cssW / 2, cssH * 0.32);
+    ctx.fillText(GAME_TITLE, cssW / 2, cssH * 0.28);
 
     ctx.font = '600 18px system-ui, sans-serif';
     ctx.fillStyle = '#cfd5dd';
-    ctx.fillText('Счёт', cssW / 2, cssH * 0.42);
+    ctx.fillText('Счёт', cssW / 2, cssH * 0.38);
     ctx.font = '800 56px system-ui, sans-serif';
     ctx.fillStyle = '#ffd24a';
-    ctx.fillText(String(score), cssW / 2, cssH * 0.52);
+    ctx.fillText(String(score), cssW / 2, cssH * 0.48);
 
     ctx.fillStyle = '#ff4d6d';
     roundRect(replayBtn.x, replayBtn.y, replayBtn.w, replayBtn.h, 12);
@@ -845,6 +1145,15 @@
     ctx.fillStyle = '#ffffff';
     ctx.font = '700 22px system-ui, sans-serif';
     ctx.fillText('Заново', cssW / 2, replayBtn.y + 34);
+
+    ctx.fillStyle = '#3d7cff';
+    roundRect(shareBtn.x, shareBtn.y, shareBtn.w, shareBtn.h, 12);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 22px system-ui, sans-serif';
+    ctx.fillText('Поделиться', cssW / 2, shareBtn.y + 34);
+
+    drawMuteButton();
   }
 
   function roundRect(x, y, w, h, r) {
@@ -867,7 +1176,8 @@
     drawParticles(drawCamY);
     drawPlayer(drawCamY);
     drawSpeedLines();
-    drawHud();
+    if (state === 'play' || state === 'pause') drawHud();
+    if (state === 'pause') drawPause();
     if (state === 'result') drawResult();
   }
 
