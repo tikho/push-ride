@@ -126,6 +126,10 @@
   let rumbleOsc = null;
   let rumbleGain = null;
   let rumbleFilter = null;
+  let flowPadOsc1 = null;
+  let flowPadOsc2 = null;
+  let flowPadGain = null;
+  let flowPadFilter = null;
   let muted = false;
   try {
     muted = localStorage.getItem(CONFIG.muteStorageKey) === '1';
@@ -200,7 +204,33 @@
       playTone(640, 0.18, 'triangle', 0.035);
     } else if (name === 'jump') {
       playTone(360, 0.07, 'sine', 0.05);
+    } else if (name === 'whoosh') {
+      playWhoosh();
     }
+  }
+
+  function playWhoosh() {
+    const ctx = ensureAudio();
+    if (!ctx || muted) return;
+    const dur = CONFIG.whooshDur;
+    const len = Math.max(1, (ctx.sampleRate * dur) | 0);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'highpass';
+    filter.frequency.value = CONFIG.whooshFilter;
+    const gain = ctx.createGain();
+    gain.gain.value = CONFIG.whooshVol;
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    src.start();
+    playTone(CONFIG.whooshTone, dur, 'sine', CONFIG.whooshToneVol);
+    playTone(CONFIG.whooshTone2, dur, 'triangle', CONFIG.whooshToneVol);
   }
 
   function startRumble() {
@@ -253,12 +283,75 @@
     }
   }
 
+  function startFlowPad() {
+    if (muted || flowPadOsc1) return;
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    flowPadFilter = ctx.createBiquadFilter();
+    flowPadFilter.type = 'lowpass';
+    flowPadFilter.frequency.value = CONFIG.flowPadCutoff;
+    flowPadGain = ctx.createGain();
+    flowPadGain.gain.value = 0.001;
+    flowPadOsc1 = ctx.createOscillator();
+    flowPadOsc2 = ctx.createOscillator();
+    flowPadOsc1.type = 'sine';
+    flowPadOsc2.type = 'triangle';
+    flowPadOsc1.frequency.value = CONFIG.flowPadFreq1;
+    flowPadOsc2.frequency.value = CONFIG.flowPadFreq2;
+    flowPadOsc1.connect(flowPadFilter);
+    flowPadOsc2.connect(flowPadFilter);
+    flowPadFilter.connect(flowPadGain);
+    flowPadGain.connect(ctx.destination);
+    flowPadOsc1.start();
+    flowPadOsc2.start();
+    flowPadGain.gain.exponentialRampToValueAtTime(
+      CONFIG.flowPadGain,
+      ctx.currentTime + CONFIG.flowPadAttackMs / 1000
+    );
+  }
+
+  function stopFlowPad() {
+    const ctx = audioCtx;
+    const osc1 = flowPadOsc1;
+    const osc2 = flowPadOsc2;
+    const gain = flowPadGain;
+    const filter = flowPadFilter;
+    flowPadOsc1 = null;
+    flowPadOsc2 = null;
+    flowPadGain = null;
+    flowPadFilter = null;
+    if (!osc1 && !gain) return;
+    const fade = CONFIG.flowPadFadeMs / 1000;
+    if (ctx && gain) {
+      try {
+        gain.gain.cancelScheduledValues(ctx.currentTime);
+        const now = Math.max(gain.gain.value, 0.001);
+        gain.gain.setValueAtTime(now, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + fade);
+      } catch (e) {}
+    }
+    setTimeout(function () {
+      try {
+        if (osc1) osc1.stop();
+      } catch (e) {}
+      try {
+        if (osc2) osc2.stop();
+      } catch (e) {}
+      if (osc1) osc1.disconnect();
+      if (osc2) osc2.disconnect();
+      if (filter) filter.disconnect();
+      if (gain) gain.disconnect();
+    }, CONFIG.flowPadFadeMs + 30);
+  }
+
   function setMuted(next) {
     muted = next;
     try {
       localStorage.setItem(CONFIG.muteStorageKey, muted ? '1' : '0');
     } catch (e) {}
     if (muted) stopRumble();
+    if (muted) stopFlowPad();
+    else if (flowLeftMs > 0) startFlowPad();
   }
 
   function makePlaceholder(w, h, paint) {
@@ -440,6 +533,15 @@
   let pointerHeld = false;
   let holdMs = 0;
   let currentSpeed = CONFIG.speedBase;
+  let cruiseSpeed = CONFIG.speedBase;
+  let comboMul = 1;
+  let comboPopMs = 0;
+  let airTimeMs = 0;
+  let airTricks = 0;
+  let camZoom = 1;
+  let flowChargeMs = 0;
+  let flowLeftMs = 0;
+  let flowVisual = 0;
   let replayBtn = { x: 0, y: 0, w: 180, h: 48 };
   let shareBtn = { x: 0, y: 0, w: 180, h: 48 };
   let recordsBtn = { x: 0, y: 0, w: 180, h: 48 };
@@ -504,12 +606,14 @@
     pointerHeld = false;
     holdMs = 0;
     stopRumble();
+    stopFlowPad();
   }
 
   function resumeGame() {
     if (state !== 'pause') return;
     state = 'play';
     lastTs = 0;
+    if (flowLeftMs > 0) startFlowPad();
   }
 
   function shareScore() {
@@ -542,6 +646,16 @@
     pointerHeld = false;
     holdMs = 0;
     currentSpeed = CONFIG.speedBase;
+    cruiseSpeed = CONFIG.speedBase;
+    comboMul = 1;
+    comboPopMs = 0;
+    airTimeMs = 0;
+    airTricks = 0;
+    camZoom = 1;
+    flowChargeMs = 0;
+    flowLeftMs = 0;
+    flowVisual = 0;
+    stopFlowPad();
     player.vy = 0;
     player.onGround = true;
     player.inAir = false;
@@ -622,6 +736,8 @@
     player.vy = -CONFIG.jumpPower;
     player.onGround = false;
     player.inAir = true;
+    airTimeMs = 0;
+    airTricks = 0;
     return true;
   }
 
@@ -630,6 +746,8 @@
     player.flipping = true;
     player.flipAgeMs = 0;
     player.boardSpin = 0;
+    airTricks += 1;
+    bumpCombo();
     if (!attractMode) haptic('medium');
     playSound('flip');
   }
@@ -694,7 +812,7 @@
 
   function spawnObstacle(x) {
     const type = OBSTACLE_TYPES[(Math.random() * OBSTACLE_TYPES.length) | 0];
-    obstacles.push({ type: type, x: x, hit: false });
+    obstacles.push({ type: type, x: x, hit: false, nearPending: false, nearAwarded: false });
   }
 
   function spawnStickerArc(baseX) {
@@ -731,6 +849,43 @@
     speedMul = Math.min(speedMul, factor);
     slowUntilMs = Math.max(slowUntilMs, ms);
     if (withShake) shakeLeftMs = CONFIG.shakeMs;
+    halfCombo();
+    flowChargeMs = 0;
+    if (flowLeftMs > 0) {
+      flowLeftMs = 0;
+      stopFlowPad();
+    }
+  }
+
+  function bumpCombo() {
+    if (attractMode) return;
+    const next = comboMul < 2 ? 2 : Math.min(CONFIG.comboMax, Math.floor(comboMul) + 1);
+    comboMul = next;
+    comboPopMs = CONFIG.comboPopMs;
+  }
+
+  function halfCombo() {
+    if (comboMul <= 1) return;
+    comboMul = Math.max(1, comboMul / 2);
+    comboPopMs = CONFIG.comboPopMs;
+  }
+
+  function applyScore(base) {
+    if (attractMode) return;
+    let pts = base * Math.max(1, comboMul);
+    if (flowLeftMs > 0) pts *= CONFIG.flowScoreMul;
+    score += Math.round(pts);
+  }
+
+  function applyAirLandingBonus() {
+    let bonus = 0;
+    if (airTricks > 0) bonus += CONFIG.airTrickSpeedBonus * airTricks;
+    if (airTimeMs >= CONFIG.airTimeBonusMs) bonus += CONFIG.airTrickSpeedBonus;
+    if (bonus > 0) {
+      cruiseSpeed = Math.min(CONFIG.speedMax, cruiseSpeed + bonus);
+    }
+    airTricks = 0;
+    airTimeMs = 0;
   }
 
   function burstParticles(wx, wy, color, lifeMs) {
@@ -785,12 +940,25 @@
       const o = obstacles[i];
       if (o.hit) continue;
       const oy = terrain(o.x) - (o.type === 'crack' ? 4 : 18);
-      if (!circlesHit(px, pcy, o.x, oy)) continue;
-      o.hit = true;
-      if (o.type === 'crack') {
-        applyStumble(CONFIG.crackSpeedFactor, CONFIG.crackMs, false);
-      } else {
-        applyStumble(CONFIG.stumbleSpeedFactor, CONFIG.stumbleMs, true);
+      if (circlesHit(px, pcy, o.x, oy)) {
+        o.hit = true;
+        if (o.type === 'crack') {
+          applyStumble(CONFIG.crackSpeedFactor, CONFIG.crackMs, false);
+        } else {
+          applyStumble(CONFIG.stumbleSpeedFactor, CONFIG.stumbleMs, true);
+        }
+        continue;
+      }
+      const dx = o.x - px;
+      if (!o.nearAwarded && Math.abs(dx) < CONFIG.nearMissPx) {
+        o.nearPending = true;
+      }
+      if (!o.nearAwarded && o.nearPending && px > o.x) {
+        o.nearAwarded = true;
+        applyScore(CONFIG.nearMissPoints);
+        bumpCombo();
+        playSound('whoosh');
+        if (!attractMode) haptic('light');
       }
     }
 
@@ -800,7 +968,8 @@
       const sy = terrain(s.x) - s.lift;
       if (!circlesHit(px, pcy, s.x, sy)) continue;
       s.taken = true;
-      if (!attractMode) score += CONFIG.stickerPoints;
+      applyScore(CONFIG.stickerPoints);
+      if (player.inAir) bumpCombo();
       burstParticles(s.x, sy, '#ffd24a', 400);
       playSound('sticker');
     }
@@ -893,6 +1062,7 @@
         timeLeftMs = 0;
         state = 'result';
         stopRumble();
+        stopFlowPad();
         submitScore();
         return;
       }
@@ -911,12 +1081,28 @@
       }
     }
     if (shakeLeftMs > 0) shakeLeftMs -= dt;
+    if (comboPopMs > 0) {
+      comboPopMs -= dt;
+      if (comboPopMs < 0) comboPopMs = 0;
+    }
 
-    const progress = attractMode
-      ? Math.min(1, (runElapsedMs % 60000) / 60000)
-      : Math.min(1, runElapsedMs / (CONFIG.timerSec * 1000));
-    currentSpeed =
-      (CONFIG.speedBase + (CONFIG.speedMax - CONFIG.speedBase) * progress) * speedMul;
+    const pxNow = worldX + player.screenX;
+    if (player.inAir) {
+      airTimeMs += dt;
+    } else {
+      const ang = slopeAngle(pxNow);
+      let target = CONFIG.speedBase;
+      if (ang > CONFIG.slopeDeadzone) target = CONFIG.speedMax;
+      else if (ang < -CONFIG.slopeDeadzone) {
+        target = CONFIG.speedBase - CONFIG.speedUphillDelta;
+      }
+      cruiseSpeed = lerp(cruiseSpeed, target, CONFIG.speedSlopeLerp);
+    }
+    cruiseSpeed = Math.max(
+      CONFIG.speedBase - CONFIG.speedUphillDelta,
+      Math.min(CONFIG.speedMax, cruiseSpeed)
+    );
+    currentSpeed = cruiseSpeed * speedMul;
     worldX += currentSpeed;
     const px = worldX + player.screenX;
     const groundY = terrain(px);
@@ -942,6 +1128,7 @@
         player.inAir = false;
         player.flipping = false;
         player.boardSpin = 0;
+        applyAirLandingBonus();
         spawnLandDust(px, groundY);
         if (!attractMode) {
           haptic('medium');
@@ -963,6 +1150,31 @@
     const camTarget = player.y - cssH * 0.65;
     camY += (camTarget - camY) * CONFIG.cameraSmooth;
 
+    let zoomTarget = CONFIG.camZoomOut;
+    if (slowUntilMs > 0 || currentSpeed <= CONFIG.camZoomSpeed) zoomTarget = 1;
+    camZoom = lerp(camZoom, zoomTarget, CONFIG.camZoomLerp);
+
+    if (slowUntilMs > 0) {
+      flowChargeMs = 0;
+    } else if (flowLeftMs <= 0) {
+      flowChargeMs += dt;
+      if (flowChargeMs >= CONFIG.flowChargeMs) {
+        flowChargeMs = 0;
+        flowLeftMs = CONFIG.flowDurationMs;
+        startFlowPad();
+        burstParticles(px, player.y, '#ffb347', 500);
+        if (!attractMode) haptic('heavy');
+      }
+    }
+    if (flowLeftMs > 0) {
+      flowLeftMs -= dt;
+      if (flowLeftMs <= 0) {
+        flowLeftMs = 0;
+        stopFlowPad();
+      }
+    }
+    flowVisual = lerp(flowVisual, flowLeftMs > 0 ? 1 : 0, CONFIG.flowVisualLerp);
+
     spawnAhead();
     updateCollisions(px);
     pruneEntities(px);
@@ -978,16 +1190,24 @@
     return ((runElapsedMs / 1000) / CONFIG.dayCycleSec) % 1;
   }
 
+  function viewPad() {
+    const z = Math.min(camZoom, 1);
+    return Math.ceil(cssW * (1 / z - 1)) + 40;
+  }
+
   function drawSky() {
     const phase = dayPhase();
     const noon = 1 - Math.abs(phase - 0.5) * 2;
-    const top = lerpColor('#0b1a33', '#6ec6ff', noon);
-    const bot = lerpColor('#1a2a44', '#c9e9ff', noon);
-    const g = ctx.createLinearGradient(0, 0, 0, cssH);
+    const coolTop = lerpColor('#0b1a33', '#6ec6ff', noon);
+    const coolBot = lerpColor('#1a2a44', '#c9e9ff', noon);
+    const top = lerpColor(coolTop, '#ff7a3a', flowVisual);
+    const bot = lerpColor(coolBot, '#ffe0a8', flowVisual);
+    const pad = viewPad();
+    const g = ctx.createLinearGradient(0, -pad, 0, cssH + pad);
     g.addColorStop(0, top);
     g.addColorStop(1, bot);
     ctx.fillStyle = g;
-    ctx.fillRect(0, 0, cssW, cssH);
+    ctx.fillRect(-pad, -pad, cssW + pad * 2, cssH + pad * 2);
 
     if (noon < 0.35) {
       ctx.fillStyle = 'rgba(255,255,220,' + (0.35 - noon) + ')';
@@ -998,35 +1218,62 @@
     }
   }
 
+  function parseColor(c) {
+    if (c.charAt(0) === '#') {
+      return [
+        parseInt(c.slice(1, 3), 16),
+        parseInt(c.slice(3, 5), 16),
+        parseInt(c.slice(5, 7), 16),
+      ];
+    }
+    const m = /rgb\((\d+),(\d+),(\d+)\)/.exec(c);
+    if (!m) return [255, 255, 255];
+    return [Number(m[1]), Number(m[2]), Number(m[3])];
+  }
+
   function lerpColor(a, b, t) {
-    const ar = parseInt(a.slice(1, 3), 16);
-    const ag = parseInt(a.slice(3, 5), 16);
-    const ab = parseInt(a.slice(5, 7), 16);
-    const br = parseInt(b.slice(1, 3), 16);
-    const bg = parseInt(b.slice(3, 5), 16);
-    const bb = parseInt(b.slice(5, 7), 16);
-    const r = (ar + (br - ar) * t) | 0;
-    const g = (ag + (bg - ag) * t) | 0;
-    const bl = (ab + (bb - ab) * t) | 0;
+    const A = parseColor(a);
+    const B = parseColor(b);
+    const r = (A[0] + (B[0] - A[0]) * t) | 0;
+    const g = (A[1] + (B[1] - A[1]) * t) | 0;
+    const bl = (A[2] + (B[2] - A[2]) * t) | 0;
     return 'rgb(' + r + ',' + g + ',' + bl + ')';
   }
 
   function drawParallax(drawCamY) {
     const phase = dayPhase();
     const noon = 1 - Math.abs(phase - 0.5) * 2;
-    drawMountainLayer(CONFIG.parallaxFar, drawCamY, 0.55, lerpColor('#2a3a55', '#7a9bb8', noon), 90);
-    drawForestLayer(CONFIG.parallaxMid, drawCamY, lerpColor('#1e3d28', '#3d7a4a', noon), 70);
-    drawMountainLayer(CONFIG.parallaxNear, drawCamY, 0.7, lerpColor('#243248', '#5f7f6a', noon), 110);
+    drawMountainLayer(
+      CONFIG.parallaxFar,
+      drawCamY,
+      0.55,
+      lerpColor(lerpColor('#2a3a55', '#7a9bb8', noon), '#d9894a', flowVisual),
+      90
+    );
+    drawForestLayer(
+      CONFIG.parallaxMid,
+      drawCamY,
+      lerpColor(lerpColor('#1e3d28', '#3d7a4a', noon), '#c4a02a', flowVisual),
+      70
+    );
+    drawMountainLayer(
+      CONFIG.parallaxNear,
+      drawCamY,
+      0.7,
+      lerpColor(lerpColor('#243248', '#5f7f6a', noon), '#c97a38', flowVisual),
+      110
+    );
     drawGuardrail(CONFIG.parallaxFar * 0.85, drawCamY);
   }
 
   function drawMountainLayer(factor, drawCamY, baseRatio, color, amp) {
     const offset = Math.round(worldX * factor);
     const base = Math.round(cssH * baseRatio - (drawCamY - CONFIG.terrainBase) * factor * 0.15);
+    const pad = viewPad();
     ctx.fillStyle = color;
     ctx.beginPath();
-    ctx.moveTo(0, cssH);
-    for (let sx = 0; sx <= cssW + 40; sx += 40) {
+    ctx.moveTo(-pad, cssH + pad);
+    for (let sx = -pad; sx <= cssW + pad; sx += 40) {
       const wx = sx + offset;
       const y =
         base -
@@ -1034,7 +1281,7 @@
         Math.abs(Math.sin(wx * 0.01)) * (amp * 0.35);
       ctx.lineTo(sx, Math.round(y));
     }
-    ctx.lineTo(cssW, cssH);
+    ctx.lineTo(cssW + pad, cssH + pad);
     ctx.closePath();
     ctx.fill();
   }
@@ -1042,8 +1289,9 @@
   function drawForestLayer(factor, drawCamY, color, amp) {
     const offset = Math.round(worldX * factor);
     const base = Math.round(cssH * 0.62 - (drawCamY - CONFIG.terrainBase) * factor * 0.12);
+    const pad = viewPad();
     ctx.fillStyle = color;
-    for (let sx = -20; sx <= cssW + 40; sx += 28) {
+    for (let sx = -pad; sx <= cssW + pad; sx += 28) {
       const wx = sx + offset;
       const h = 28 + (Math.sin(wx * 0.05) * 0.5 + 0.5) * amp * 0.5;
       const y = Math.round(base - h);
@@ -1059,13 +1307,14 @@
   function drawGuardrail(factor, drawCamY) {
     const offset = Math.round(worldX * factor);
     const base = Math.round(cssH * 0.58 - (drawCamY - CONFIG.terrainBase) * factor * 0.12);
+    const pad = viewPad();
     ctx.strokeStyle = 'rgba(180,190,200,0.55)';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(0, base);
-    ctx.lineTo(cssW, base);
+    ctx.moveTo(-pad, base);
+    ctx.lineTo(cssW + pad, base);
     ctx.stroke();
-    for (let sx = -((offset % 36) + 36) % 36; sx <= cssW; sx += 36) {
+    for (let sx = -pad - ((offset % 36) + 36) % 36; sx <= cssW + pad; sx += 36) {
       ctx.fillStyle = 'rgba(160,170,180,0.65)';
       ctx.fillRect(sx, base - 10, 3, 14);
     }
@@ -1074,26 +1323,29 @@
   function drawTerrain(drawCamY) {
     const step = CONFIG.terrainStep;
     const half = CONFIG.roadWidth / 2;
+    const pad = viewPad();
+    const x0 = -pad;
+    const x1 = cssW + pad;
 
     ctx.beginPath();
-    ctx.moveTo(0, cssH + 2);
-    for (let sx = 0; sx <= cssW + step; sx += step) {
+    ctx.moveTo(x0, cssH + pad);
+    for (let sx = x0; sx <= x1 + step; sx += step) {
       const gy = Math.round(terrain(worldX + sx) - drawCamY) + half + 18;
       ctx.lineTo(sx, gy);
     }
-    ctx.lineTo(cssW + step, cssH + 2);
+    ctx.lineTo(x1 + step, cssH + pad);
     ctx.closePath();
-    ctx.fillStyle = '#3d8f4a';
+    ctx.fillStyle = lerpColor('#3d8f4a', '#c9a227', flowVisual);
     ctx.fill();
 
     ctx.beginPath();
-    for (let sx = 0; sx <= cssW + step; sx += step) {
+    for (let sx = x0; sx <= x1 + step; sx += step) {
       const gy = Math.round(terrain(worldX + sx) - drawCamY);
       const y = gy - half;
-      if (sx === 0) ctx.moveTo(sx, y);
+      if (sx === x0) ctx.moveTo(sx, y);
       else ctx.lineTo(sx, y);
     }
-    for (let sx = cssW + step; sx >= 0; sx -= step) {
+    for (let sx = x1 + step; sx >= x0; sx -= step) {
       const gy = Math.round(terrain(worldX + sx) - drawCamY);
       ctx.lineTo(sx, gy + half);
     }
@@ -1104,16 +1356,16 @@
     ctx.strokeStyle = '#f5f7fa';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    for (let sx = 0; sx <= cssW + step; sx += step) {
+    for (let sx = x0; sx <= x1 + step; sx += step) {
       const gy = Math.round(terrain(worldX + sx) - drawCamY) - half;
-      if (sx === 0) ctx.moveTo(sx, gy);
+      if (sx === x0) ctx.moveTo(sx, gy);
       else ctx.lineTo(sx, gy);
     }
     ctx.stroke();
     ctx.beginPath();
-    for (let sx = 0; sx <= cssW + step; sx += step) {
+    for (let sx = x0; sx <= x1 + step; sx += step) {
       const gy = Math.round(terrain(worldX + sx) - drawCamY) + half;
-      if (sx === 0) ctx.moveTo(sx, gy);
+      if (sx === x0) ctx.moveTo(sx, gy);
       else ctx.lineTo(sx, gy);
     }
     ctx.stroke();
@@ -1156,7 +1408,7 @@
       if (o.hit) continue;
       const gy = terrain(o.x);
       const s = worldToScreen(o.x, gy, drawCamY);
-      if (s.x < -40 || s.x > cssW + 40) continue;
+      if (s.x < -40 - viewPad() || s.x > cssW + 40 + viewPad()) continue;
       if (o.type === 'cone') drawCone(s.x, s.y);
       else if (o.type === 'crack') drawCrack(s.x, s.y);
       else drawCurb(s.x, s.y);
@@ -1169,7 +1421,7 @@
       if (st.taken) continue;
       const wy = terrain(st.x) - st.lift;
       const s = worldToScreen(st.x, wy, drawCamY);
-      if (s.x < -30 || s.x > cssW + 30) continue;
+      if (s.x < -30 - viewPad() || s.x > cssW + 30 + viewPad()) continue;
       ctx.save();
       ctx.translate(s.x, s.y);
       ctx.rotate(runElapsedMs * 0.004);
@@ -1250,6 +1502,32 @@
     ctx.restore();
   }
 
+  function comboLabel() {
+    if (comboMul % 1 === 0) return 'x' + comboMul;
+    return 'x' + comboMul.toFixed(1);
+  }
+
+  function drawCombo(drawCamY) {
+    if (comboMul <= 1) return;
+    const pop = comboPopMs > 0 ? comboPopMs / CONFIG.comboPopMs : 0;
+    const scale = 1 + pop * CONFIG.comboPopScale;
+    const sx = player.screenX;
+    const sy = Math.round(player.y - drawCamY) - CONFIG.spriteH;
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.scale(scale, scale);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '800 24px system-ui, sans-serif';
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = 'rgba(20,16,10,0.55)';
+    ctx.fillStyle = flowLeftMs > 0 ? '#ffd24a' : '#ffffff';
+    const label = comboLabel();
+    ctx.strokeText(label, 0, 0);
+    ctx.fillText(label, 0, 0);
+    ctx.restore();
+  }
+
   function drawSpeedLines() {
     if (currentSpeed <= CONFIG.speedLineThreshold) return;
     const strength = Math.min(1, (currentSpeed - CONFIG.speedLineThreshold) / 2);
@@ -1317,6 +1595,20 @@
     ctx.fillText('Стикеры', pad + 12, padTop + 22);
     ctx.font = '700 24px system-ui, sans-serif';
     ctx.fillText(String(score), pad + 12, padTop + 46);
+
+    const meterY = padTop + 54 + CONFIG.flowMeterGap;
+    const meterW = 150;
+    const meterH = CONFIG.flowMeterH;
+    const meterT =
+      flowLeftMs > 0 ? 1 : Math.min(1, flowChargeMs / CONFIG.flowChargeMs);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    roundRect(pad, meterY, meterW, meterH, 4);
+    ctx.fill();
+    if (meterT > 0) {
+      ctx.fillStyle = flowLeftMs > 0 ? '#ffb347' : '#7ec8ff';
+      roundRect(pad, meterY, meterW * meterT, meterH, 4);
+      ctx.fill();
+    }
 
     const sec = Math.ceil(timeLeftMs / 1000);
     ctx.textAlign = 'right';
@@ -1496,6 +1788,12 @@
 
   function draw() {
     const drawCamY = Math.round(camY);
+    ctx.save();
+    const ax = player.screenX;
+    const ay = player.y - drawCamY;
+    ctx.translate(ax, ay);
+    ctx.scale(camZoom, camZoom);
+    ctx.translate(-ax, -ay);
     drawSky();
     drawParallax(drawCamY);
     drawTerrain(drawCamY);
@@ -1503,7 +1801,9 @@
     drawStickers(drawCamY);
     drawParticles(drawCamY);
     drawPlayer(drawCamY);
+    drawCombo(drawCamY);
     drawSpeedLines();
+    ctx.restore();
     if (state === 'play' || state === 'pause') drawHud();
     if (state === 'pause') drawPause();
     if (state === 'result') drawResult();

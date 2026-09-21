@@ -1,4 +1,4 @@
-const CACHE_NAME = 'push-ride-m8-v1';
+const CACHE_NAME = 'push-ride-m9-v1';
 
 const SHELL = [
   './',
