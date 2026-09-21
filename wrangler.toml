@@ -1,4 +1,4 @@
-name = "push-ride-scores"
+name = "push-ride"
 main = "worker/index.js"
 compatibility_date = "2024-09-23"
 
