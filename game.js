@@ -569,6 +569,10 @@
   let scoreFrom = 0;
   let scoreTo = 0;
   let scoreTweenLeft = 0;
+  let timeShown = CONFIG.timerSec;
+  let timeFrom = CONFIG.timerSec;
+  let timeTo = CONFIG.timerSec;
+  let timeTweenLeft = 0;
   let squashX = 1;
   let squashY = 1;
   let squashPeakX = 1;
@@ -696,6 +700,10 @@
     scoreFrom = 0;
     scoreTo = 0;
     scoreTweenLeft = 0;
+    timeShown = CONFIG.timerSec;
+    timeFrom = CONFIG.timerSec;
+    timeTo = CONFIG.timerSec;
+    timeTweenLeft = 0;
     squashX = 1;
     squashY = 1;
     squashPeakX = 1;
@@ -869,7 +877,13 @@
 
   function spawnObstacle(x) {
     const type = OBSTACLE_TYPES[(Math.random() * OBSTACLE_TYPES.length) | 0];
-    obstacles.push({ type: type, x: x, hit: false, nearPending: false, nearAwarded: false });
+    obstacles.push({
+      type: type,
+      x: x,
+      hit: false,
+      nearAwarded: false,
+      minDist: Infinity,
+    });
   }
 
   function spawnStickerArc(baseX) {
@@ -951,6 +965,26 @@
     }
   }
 
+  function updateTimeTween(dt) {
+    const target = Math.ceil(Math.max(0, timeLeftMs) / 1000);
+    if (target !== timeTo) {
+      timeFrom = timeShown;
+      timeTo = target;
+      timeTweenLeft = CONFIG.scoreTweenMs;
+    }
+    if (timeTweenLeft <= 0) {
+      timeShown = timeTo;
+      return;
+    }
+    timeTweenLeft -= dt;
+    const t = 1 - Math.max(0, timeTweenLeft) / CONFIG.scoreTweenMs;
+    timeShown = lerp(timeFrom, timeTo, easeOutCubic(t));
+    if (timeTweenLeft <= 0) {
+      timeTweenLeft = 0;
+      timeShown = timeTo;
+    }
+  }
+
   function updateSquash(dt) {
     if (squashLeft <= 0) {
       squashX = 1;
@@ -1001,16 +1035,16 @@
   function burstParticles(wx, wy, color, lifeMs) {
     const budget = CONFIG.maxParticles - particles.length;
     const k = CONFIG.particleSpeedFloor + (1 - CONFIG.particleSpeedFloor) * speedK();
-    const n = Math.min(budget, Math.max(1, Math.round(CONFIG.burstCount * k)));
+    const n = Math.min(budget, Math.max(0, Math.round(CONFIG.burstCount * k)));
     const life = lifeMs || 400;
     for (let i = 0; i < n; i++) {
       const a = Math.random() * Math.PI * 2;
-      const sp = 1.5 + Math.random() * 3.5;
+      const sp = (1.5 + Math.random() * 3.5) * k;
       particles.push({
         x: wx,
         y: wy,
         vx: Math.cos(a) * sp,
-        vy: Math.sin(a) * sp - 1.5,
+        vy: Math.sin(a) * sp - 1.5 * k,
         life: life,
         maxLife: life,
         color: color,
@@ -1028,8 +1062,8 @@
       particles.push({
         x: wx + (Math.random() * 2 - 1) * 16,
         y: wy - 2,
-        vx: -1.2 - Math.random() * 2.4,
-        vy: -0.4 - Math.random() * 1.6,
+        vx: (-1.2 - Math.random() * 2.4) * k,
+        vy: (-0.4 - Math.random() * 1.6) * k,
         life: life,
         maxLife: life,
         color: i % 2 === 0 ? '#c4b59a' : '#9a8b72',
@@ -1062,15 +1096,18 @@
         continue;
       }
       const dx = o.x - px;
-      if (!o.nearAwarded && Math.abs(dx) < CONFIG.nearMissPx) {
-        o.nearPending = true;
-      }
-      if (!o.nearAwarded && o.nearPending && px > o.x) {
+      const dy = oy - pcy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < o.minDist) o.minDist = dist;
+      if (!o.nearAwarded && px > o.x) {
         o.nearAwarded = true;
-        applyScore(CONFIG.nearMissPoints);
-        bumpCombo();
-        playSound('whoosh');
-        if (!attractMode) haptic('light');
+        const hitDist = CONFIG.hitRadius * 2;
+        if (o.minDist < hitDist + CONFIG.nearMissPx) {
+          applyScore(CONFIG.nearMissPoints);
+          bumpCombo();
+          playSound('whoosh');
+          if (!attractMode) haptic('light');
+        }
       }
     }
 
@@ -1158,6 +1195,7 @@
 
   function update(dt) {
     updateScoreTween(dt);
+    updateTimeTween(dt);
     updateSquash(dt);
 
     if (state === 'pause' || state === 'result' || state === 'leaderboard') {
@@ -1792,7 +1830,7 @@
       ctx.fill();
     }
 
-    const sec = Math.ceil(timeLeftMs / 1000);
+    const sec = Math.max(0, Math.round(timeShown));
     ctx.textAlign = 'right';
     ctx.font = '600 16px system-ui, sans-serif';
     ctx.fillText('Время', cssW - pad - 64, padTop + 22);
