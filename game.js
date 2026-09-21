@@ -95,6 +95,22 @@
     return a + (b - a) * t;
   }
 
+  function easeOutCubic(t) {
+    const x = Math.max(0, Math.min(1, t));
+    return 1 - Math.pow(1 - x, 3);
+  }
+
+  function easeOutBack(t) {
+    const x = Math.max(0, Math.min(1, t));
+    const c1 = CONFIG.overlaySpringOvershoot;
+    const c3 = c1 + 1;
+    return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
+  }
+
+  function speedK() {
+    return Math.max(0, Math.min(1, currentSpeed / CONFIG.speedMax));
+  }
+
   function perlin1(x) {
     const xi = Math.floor(x);
     const xf = x - xi;
@@ -153,6 +169,13 @@
         tg.HapticFeedback.impactOccurred(style);
       }
     } catch (e) {}
+  }
+
+  function hapticDouble() {
+    haptic('medium');
+    setTimeout(function () {
+      haptic('medium');
+    }, CONFIG.hapticDoubleMs);
   }
 
   function playTone(freq, dur, type, vol) {
@@ -542,6 +565,18 @@
   let flowChargeMs = 0;
   let flowLeftMs = 0;
   let flowVisual = 0;
+  let scoreShown = 0;
+  let scoreFrom = 0;
+  let scoreTo = 0;
+  let scoreTweenLeft = 0;
+  let squashX = 1;
+  let squashY = 1;
+  let squashPeakX = 1;
+  let squashPeakY = 1;
+  let squashLeft = 0;
+  let overlayAgeMs = 0;
+  let hitStopLeft = 0;
+  let meterShown = 0;
   let replayBtn = { x: 0, y: 0, w: 180, h: 48 };
   let shareBtn = { x: 0, y: 0, w: 180, h: 48 };
   let recordsBtn = { x: 0, y: 0, w: 180, h: 48 };
@@ -572,6 +607,7 @@
 
   function openLeaderboard() {
     state = 'leaderboard';
+    overlayAgeMs = 0;
     leaderboard.loading = true;
     leaderboard.error = '';
     leaderboard.top = [];
@@ -603,6 +639,7 @@
     if (attractMode) return;
     if (state !== 'play') return;
     state = 'pause';
+    overlayAgeMs = 0;
     pointerHeld = false;
     holdMs = 0;
     stopRumble();
@@ -655,6 +692,18 @@
     flowChargeMs = 0;
     flowLeftMs = 0;
     flowVisual = 0;
+    scoreShown = 0;
+    scoreFrom = 0;
+    scoreTo = 0;
+    scoreTweenLeft = 0;
+    squashX = 1;
+    squashY = 1;
+    squashPeakX = 1;
+    squashPeakY = 1;
+    squashLeft = 0;
+    overlayAgeMs = 0;
+    hitStopLeft = 0;
+    meterShown = 0;
     stopFlowPad();
     player.vy = 0;
     player.onGround = true;
@@ -738,6 +787,11 @@
     player.inAir = true;
     airTimeMs = 0;
     airTricks = 0;
+    squashPeakX = 1 - CONFIG.squashAmt;
+    squashPeakY = 1 + CONFIG.squashAmt;
+    squashX = squashPeakX;
+    squashY = squashPeakY;
+    squashLeft = CONFIG.squashMs;
     return true;
   }
 
@@ -783,7 +837,10 @@
     }
 
     if (state === 'leaderboard') {
-      if (hitRect(backLbBtn, p.x, p.y)) state = 'result';
+      if (hitRect(backLbBtn, p.x, p.y)) {
+        state = 'result';
+        overlayAgeMs = 0;
+      }
       return;
     }
 
@@ -875,6 +932,59 @@
     let pts = base * Math.max(1, comboMul);
     if (flowLeftMs > 0) pts *= CONFIG.flowScoreMul;
     score += Math.round(pts);
+    scoreFrom = scoreShown;
+    scoreTo = score;
+    scoreTweenLeft = CONFIG.scoreTweenMs;
+  }
+
+  function updateScoreTween(dt) {
+    if (scoreTweenLeft <= 0) {
+      scoreShown = score;
+      return;
+    }
+    scoreTweenLeft -= dt;
+    const t = 1 - Math.max(0, scoreTweenLeft) / CONFIG.scoreTweenMs;
+    scoreShown = lerp(scoreFrom, scoreTo, easeOutCubic(t));
+    if (scoreTweenLeft <= 0) {
+      scoreTweenLeft = 0;
+      scoreShown = scoreTo;
+    }
+  }
+
+  function updateSquash(dt) {
+    if (squashLeft <= 0) {
+      squashX = 1;
+      squashY = 1;
+      return;
+    }
+    squashLeft -= dt;
+    const t = 1 - Math.max(0, squashLeft) / CONFIG.squashMs;
+    const e = easeOutCubic(t);
+    squashX = lerp(squashPeakX, 1, e);
+    squashY = lerp(squashPeakY, 1, e);
+    if (squashLeft <= 0) {
+      squashLeft = 0;
+      squashX = 1;
+      squashY = 1;
+    }
+  }
+
+  function overlayScale() {
+    const t = overlayAgeMs / CONFIG.overlaySpringMs;
+    const e = easeOutBack(t);
+    return CONFIG.overlaySpringFrom + (1 - CONFIG.overlaySpringFrom) * e;
+  }
+
+  function beginOverlay() {
+    const s = overlayScale();
+    ctx.save();
+    ctx.translate(cssW / 2, cssH / 2);
+    ctx.scale(s, s);
+    ctx.translate(-cssW / 2, -cssH / 2);
+  }
+
+  function endOverlay() {
+    ctx.restore();
   }
 
   function applyAirLandingBonus() {
@@ -890,7 +1000,8 @@
 
   function burstParticles(wx, wy, color, lifeMs) {
     const budget = CONFIG.maxParticles - particles.length;
-    const n = Math.min(14, budget);
+    const k = CONFIG.particleSpeedFloor + (1 - CONFIG.particleSpeedFloor) * speedK();
+    const n = Math.min(budget, Math.max(1, Math.round(CONFIG.burstCount * k)));
     const life = lifeMs || 400;
     for (let i = 0; i < n; i++) {
       const a = Math.random() * Math.PI * 2;
@@ -910,7 +1021,8 @@
 
   function spawnLandDust(wx, wy) {
     const budget = CONFIG.maxParticles - particles.length;
-    const n = Math.min(CONFIG.dustCount, budget);
+    const k = CONFIG.particleSpeedFloor + (1 - CONFIG.particleSpeedFloor) * speedK();
+    const n = Math.min(budget, Math.max(1, Math.round(CONFIG.dustCount * k)));
     for (let i = 0; i < n; i++) {
       const life = CONFIG.particleFadeMs;
       particles.push({
@@ -1045,12 +1157,22 @@
   }
 
   function update(dt) {
-    if (state === 'pause') {
+    updateScoreTween(dt);
+    updateSquash(dt);
+
+    if (state === 'pause' || state === 'result' || state === 'leaderboard') {
+      overlayAgeMs += dt;
       stopRumble();
       return;
     }
     if (state !== 'play') {
       stopRumble();
+      return;
+    }
+
+    if (hitStopLeft > 0) {
+      hitStopLeft -= dt;
+      if (hitStopLeft < 0) hitStopLeft = 0;
       return;
     }
 
@@ -1061,6 +1183,7 @@
       if (timeLeftMs <= 0) {
         timeLeftMs = 0;
         state = 'result';
+        overlayAgeMs = 0;
         stopRumble();
         stopFlowPad();
         submitScore();
@@ -1122,6 +1245,7 @@
       player.vy += CONFIG.gravity;
       player.y += player.vy;
       if (player.vy > 0 && player.y >= groundY) {
+        const didTrick = airTricks > 0;
         player.y = groundY;
         player.vy = 0;
         player.onGround = true;
@@ -1129,13 +1253,18 @@
         player.flipping = false;
         player.boardSpin = 0;
         applyAirLandingBonus();
+        squashPeakX = 1 + CONFIG.squashAmt;
+        squashPeakY = 1 - CONFIG.squashAmt;
+        squashX = squashPeakX;
+        squashY = squashPeakY;
+        squashLeft = CONFIG.squashMs;
         spawnLandDust(px, groundY);
+        playSound('land');
         if (!attractMode) {
-          haptic('medium');
-          playSound('land');
-        } else {
-          playSound('land');
+          if (didTrick) haptic('medium');
+          else haptic('light');
         }
+        if (didTrick) hitStopLeft = CONFIG.hitStopMs;
       }
     } else {
       player.y = groundY;
@@ -1163,7 +1292,7 @@
         flowLeftMs = CONFIG.flowDurationMs;
         startFlowPad();
         burstParticles(px, player.y, '#ffb347', 500);
-        if (!attractMode) haptic('heavy');
+        if (!attractMode) hapticDouble();
       }
     }
     if (flowLeftMs > 0) {
@@ -1174,6 +1303,8 @@
       }
     }
     flowVisual = lerp(flowVisual, flowLeftMs > 0 ? 1 : 0, CONFIG.flowVisualLerp);
+    const meterTarget = flowLeftMs > 0 ? 1 : Math.min(1, flowChargeMs / CONFIG.flowChargeMs);
+    meterShown = lerp(meterShown, meterTarget, CONFIG.flowVisualLerp);
 
     spawnAhead();
     updateCollisions(px);
@@ -1451,7 +1582,7 @@
       ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
       ctx.fillStyle = p.color;
       ctx.beginPath();
-      ctx.arc(s.x, s.y, p.r || 3, 0, Math.PI * 2);
+      ctx.arc(s.x, s.y, (p.r || 3) * (CONFIG.particleSpeedFloor + (1 - CONFIG.particleSpeedFloor) * speedK()), 0, Math.PI * 2);
       ctx.fill();
       ctx.globalAlpha = 1;
     }
@@ -1487,6 +1618,7 @@
     ctx.save();
     ctx.translate(Math.round(player.screenX + shakeX), screenY + shakeY);
     ctx.rotate(player.angle);
+    ctx.scale(squashX, squashY);
 
     if (player.flipping) {
       drawImageCentered(body, 0, 0, sw, sh);
@@ -1499,7 +1631,57 @@
       drawImageCentered(body, 0, 0, sw, sh);
     }
 
+    drawHappyEyes(sh);
+    drawFlowSparks(sh);
     ctx.restore();
+  }
+
+  function drawHappyEyes(sh) {
+    if (comboMul < CONFIG.comboEyesMin) return;
+    const y = -sh * CONFIG.happyEyeY;
+    const spread = CONFIG.happyEyeSpread;
+    const r = CONFIG.happyEyeRadius;
+    ctx.strokeStyle = '#1a1020';
+    ctx.lineWidth = CONFIG.happyEyeWidth;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(-spread, y, r, Math.PI * 1.15, Math.PI * 1.85);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(spread, y, r, Math.PI * 1.15, Math.PI * 1.85);
+    ctx.stroke();
+  }
+
+  function drawSpark(x, y, r) {
+    ctx.beginPath();
+    ctx.moveTo(x, y - r);
+    ctx.lineTo(x, y + r);
+    ctx.moveTo(x - r, y);
+    ctx.lineTo(x + r, y);
+    ctx.moveTo(x - r * 0.7, y - r * 0.7);
+    ctx.lineTo(x + r * 0.7, y + r * 0.7);
+    ctx.moveTo(x + r * 0.7, y - r * 0.7);
+    ctx.lineTo(x - r * 0.7, y + r * 0.7);
+    ctx.stroke();
+  }
+
+  function drawFlowSparks(sh) {
+    if (flowVisual <= 0) return;
+    const n = CONFIG.flowSparkCount;
+    const baseR = CONFIG.flowSparkRadius;
+    ctx.strokeStyle = '#ffe7a3';
+    ctx.lineCap = 'round';
+    for (let i = 0; i < n; i++) {
+      const a = runElapsedMs * CONFIG.flowSparkSpin + (i * Math.PI * 2) / n;
+      const pulse = 0.55 + 0.45 * Math.sin(runElapsedMs * CONFIG.flowSparkTwinkle + i * 1.7);
+      const rad = baseR * (0.65 + 0.35 * pulse);
+      const x = Math.cos(a) * rad;
+      const y = Math.sin(a) * rad - sh * CONFIG.flowSparkLift;
+      ctx.globalAlpha = flowVisual * pulse;
+      ctx.lineWidth = 1.4 + pulse;
+      drawSpark(x, y, 2.2 + pulse * 2.2);
+    }
+    ctx.globalAlpha = 1;
   }
 
   function comboLabel() {
@@ -1529,14 +1711,15 @@
   }
 
   function drawSpeedLines() {
-    if (currentSpeed <= CONFIG.speedLineThreshold) return;
-    const strength = Math.min(1, (currentSpeed - CONFIG.speedLineThreshold) / 2);
-    ctx.strokeStyle = 'rgba(255,255,255,' + (0.12 + strength * 0.2) + ')';
-    ctx.lineWidth = 1;
-    const n = 6;
+    const k = speedK();
+    if (k <= 0) return;
+    const n = Math.max(1, Math.round(CONFIG.speedLineCount * k));
+    const alpha = CONFIG.speedLineAlpha * k;
+    ctx.strokeStyle = 'rgba(255,255,255,' + alpha + ')';
+    ctx.lineWidth = 1 + k;
     for (let i = 0; i < n; i++) {
       const y = ((i + 1) / (n + 1)) * cssH;
-      const len = 18 + (i % 3) * 10;
+      const len = CONFIG.speedLineLen * (CONFIG.particleSpeedFloor + (1 - CONFIG.particleSpeedFloor) * k);
       ctx.beginPath();
       ctx.moveTo(8, y);
       ctx.lineTo(8 + len, y);
@@ -1594,13 +1777,12 @@
     ctx.textAlign = 'left';
     ctx.fillText('Стикеры', pad + 12, padTop + 22);
     ctx.font = '700 24px system-ui, sans-serif';
-    ctx.fillText(String(score), pad + 12, padTop + 46);
+    ctx.fillText(String(Math.round(scoreShown)), pad + 12, padTop + 46);
 
     const meterY = padTop + 54 + CONFIG.flowMeterGap;
     const meterW = 150;
     const meterH = CONFIG.flowMeterH;
-    const meterT =
-      flowLeftMs > 0 ? 1 : Math.min(1, flowChargeMs / CONFIG.flowChargeMs);
+    const meterT = meterShown;
     ctx.fillStyle = 'rgba(0,0,0,0.35)';
     roundRect(pad, meterY, meterW, meterH, 4);
     ctx.fill();
@@ -1665,6 +1847,7 @@
     ctx.fillStyle = 'rgba(20, 24, 32, 0.72)';
     ctx.fillRect(0, 0, cssW, cssH);
 
+    beginOverlay();
     ctx.textAlign = 'center';
     ctx.fillStyle = '#ffffff';
     ctx.font = '800 34px system-ui, sans-serif';
@@ -1676,12 +1859,14 @@
     ctx.fillStyle = '#ffffff';
     ctx.font = '700 22px system-ui, sans-serif';
     ctx.fillText('Продолжить', cssW / 2, continueBtn.y + 34);
+    endOverlay();
   }
 
   function drawResult() {
     ctx.fillStyle = 'rgba(20, 24, 32, 0.72)';
     ctx.fillRect(0, 0, cssW, cssH);
 
+    beginOverlay();
     ctx.textAlign = 'center';
     ctx.fillStyle = '#ffffff';
     ctx.font = '800 36px system-ui, sans-serif';
@@ -1692,7 +1877,7 @@
     ctx.fillText('Счёт', cssW / 2, cssH * 0.3);
     ctx.font = '800 56px system-ui, sans-serif';
     ctx.fillStyle = '#ffd24a';
-    ctx.fillText(String(score), cssW / 2, cssH * 0.4);
+    ctx.fillText(String(Math.round(scoreShown)), cssW / 2, cssH * 0.4);
 
     ctx.fillStyle = '#ff4d6d';
     roundRect(replayBtn.x, replayBtn.y, replayBtn.w, replayBtn.h, 12);
@@ -1712,6 +1897,7 @@
     ctx.fill();
     ctx.fillStyle = '#ffffff';
     ctx.fillText('Рекорды', cssW / 2, recordsBtn.y + 32);
+    endOverlay();
 
     drawMuteButton();
   }
@@ -1720,6 +1906,7 @@
     ctx.fillStyle = 'rgba(20, 24, 32, 0.88)';
     ctx.fillRect(0, 0, cssW, cssH);
 
+    beginOverlay();
     const topY = safeTop + 36;
     ctx.textAlign = 'center';
     ctx.fillStyle = '#ffffff';
@@ -1774,6 +1961,7 @@
     ctx.fillStyle = '#ffffff';
     ctx.font = '700 20px system-ui, sans-serif';
     ctx.fillText('Назад', cssW / 2, backLbBtn.y + 32);
+    endOverlay();
   }
 
   function roundRect(x, y, w, h, r) {
