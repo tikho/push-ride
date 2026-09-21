@@ -1,0 +1,11 @@
+wrangler.toml
+.assetsignore
+.gitignore
+.cursorrules
+.clinerules
+CLAUDE.md
+PLAN.md
+.dev.vars
+.wrangler
+worker
+node_modules

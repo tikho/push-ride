@@ -2,6 +2,9 @@ name = "push-ride-scores"
 main = "worker/index.js"
 compatibility_date = "2024-09-23"
 
+[assets]
+directory = "."
+
 [vars]
 # BOT_TOKEN задаётся секретом: wrangler secret put BOT_TOKEN
 
