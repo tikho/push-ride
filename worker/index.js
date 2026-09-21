@@ -1,7 +1,7 @@
 /**
  * Push Ride scores Worker
- * POST /score  { initData, score }
- * GET  /leaderboard
+ * POST /api/score  { initData, score }
+ * GET  /api/leaderboard
  */
 
 function dayKey(date = new Date()) {
@@ -14,7 +14,7 @@ function dayKey(date = new Date()) {
 function corsHeaders() {
   return {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
     'Content-Type': 'application/json; charset=utf-8',
   };
@@ -188,16 +188,16 @@ async function handleLeaderboard(request, env) {
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: corsHeaders() });
+      return new Response(null, { status: 200, headers: corsHeaders() });
     }
 
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, '') || '/';
 
-    if (request.method === 'POST' && (path === '/score' || path.endsWith('/score'))) {
+    if (request.method === 'POST' && (path === '/api/score' || path === '/score')) {
       return handleScore(request, env);
     }
-    if (request.method === 'GET' && (path === '/leaderboard' || path.endsWith('/leaderboard'))) {
+    if (request.method === 'GET' && (path === '/api/leaderboard' || path === '/leaderboard')) {
       return handleLeaderboard(request, env);
     }
 

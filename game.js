@@ -326,11 +326,68 @@
     g.fill();
   });
 
+  const chromaScratch = document.createElement('canvas');
+
+  function purpleKeyAmount(r, gv, b) {
+    const max = Math.max(r, gv, b);
+    const min = Math.min(r, gv, b);
+    const delta = max - min;
+    if (max === 0) return 0;
+    const s = delta / max;
+    const v = max / 255;
+    let h = 0;
+    if (delta !== 0) {
+      if (max === r) h = (gv - b) / delta;
+      else if (max === gv) h = 2 + (b - r) / delta;
+      else h = 4 + (r - gv) / delta;
+      h *= 60;
+      if (h < 0) h += 360;
+    }
+    let dh = Math.abs(h - CONFIG.chromaHue);
+    if (dh > 180) dh = 360 - dh;
+    if (s < CONFIG.chromaSatMin || v < CONFIG.chromaValMin || dh > CONFIG.chromaHueRange) {
+      return 0;
+    }
+    return 1;
+  }
+
+  function applyChromaKey(img) {
+    const w = img.naturalWidth;
+    const h = img.naturalHeight;
+    chromaScratch.width = w;
+    chromaScratch.height = h;
+    const g = chromaScratch.getContext('2d');
+    g.clearRect(0, 0, w, h);
+    g.drawImage(img, 0, 0);
+    let data;
+    try {
+      data = g.getImageData(0, 0, w, h);
+    } catch (e) {
+      return img;
+    }
+    const px = data.data;
+    for (let i = 0; i < px.length; i += 4) {
+      const key = purpleKeyAmount(px[i], px[i + 1], px[i + 2]);
+      if (key > 0) px[i + 3] = Math.round(px[i + 3] * (1 - key));
+    }
+    g.putImageData(data, 0, 0);
+    const out = document.createElement('canvas');
+    out.width = w;
+    out.height = h;
+    out.getContext('2d').drawImage(chromaScratch, 0, 0);
+    return out;
+  }
+
   function loadAsset(file, fallback) {
     const img = new Image();
     const slot = { img: img, fallback: fallback, ok: false };
     img.onload = function () {
-      slot.ok = img.naturalWidth > 0;
+      if (img.naturalWidth > 0) {
+        slot.img = applyChromaKey(img);
+        slot.ok = true;
+      } else {
+        slot.ok = false;
+      }
     };
     img.onerror = function () {
       slot.ok = false;
@@ -395,7 +452,7 @@
   let attractFlipArmed = false;
 
   function apiBase() {
-    return (CONFIG.scoresApiUrl || '').replace(/\/+$/, '');
+    return (CONFIG.workerUrl || CONFIG.scoresApiUrl || '').replace(/\/+$/, '');
   }
 
   function submitScore() {
@@ -404,7 +461,7 @@
     const initData = tg && tg.initData ? tg.initData : '';
     if (!initData) return;
     scoreSubmitted = true;
-    fetch(base + '/score', {
+    fetch(base + '/api/score', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ initData: initData, score: score }),
@@ -425,7 +482,7 @@
     }
     const initData = tg && tg.initData ? tg.initData : '';
     const q = initData ? '?initData=' + encodeURIComponent(initData) : '';
-    fetch(base + '/leaderboard' + q)
+    fetch(base + '/api/leaderboard' + q)
       .then(function (r) {
         return r.json();
       })
